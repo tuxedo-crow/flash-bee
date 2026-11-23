@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Flash Bee: compile + flash to a XIAO ESP32-C3 with arduino-cli.
-# Usage: bash ~/Developer/"Flash Bee"/flash.sh [c3|c6]
+# Usage: bash flash.sh [c3|c6]   (needs arduino-cli)
 set -euo pipefail
 
 BOARD="${1:-c3}"
