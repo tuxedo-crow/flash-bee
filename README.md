@@ -75,7 +75,8 @@ The build is the "Build your own" chapter of [`Flash Bee Guide.pdf`](Flash%20Bee
 ## What has been tested
 
 - **In use:** gokux's case, wired by soldering, running this firmware on a XIAO ESP32-C3. This includes WiFi, Home Assistant, light sleep and antenna tuning.
-- **Designed, not yet built:** a solderless case (`enclosure/flashbee_case.scad`), which links the sensor through the display's microSD slot. Also a one-piece printed travel case with a magnetic clasp (`enclosure/flashbee_travel_case.scad`).
+- **Printed and working:** a one-piece travel case with a print-in-place hinge and a magnetic clasp (`enclosure/flashbee_travel_case.scad`).
+- **A possible direction, not printed:** a solderless case (`enclosure/flashbee_case.scad`) that links the sensor through the display's microSD slot, so the only soldering left is four pad bridges on the sensor.
 
 ## In this repo
 
@@ -84,7 +85,7 @@ The build is the "Build your own" chapter of [`Flash Bee Guide.pdf`](Flash%20Bee
 | `FlashBee/` | Arduino firmware |
 | `Flash Bee Quick Start.pdf`, `Flash Bee Guide.pdf` | Printable guides, built by `guide/make_guide.py` |
 | `Flash Bee/` | gokux's case: STL, STEP and PrusaSlicer projects |
-| `enclosure/` | OpenSCAD designs: the solderless case, the travel case and a concept; sliced files in `exports/` |
+| `enclosure/` | OpenSCAD designs: the travel case, the solderless case (not printed) and a concept; sliced files in `exports/` |
 | `tools/provision.py` | Sets WiFi, OTA and MQTT over USB |
 | [`docs/using.md`](docs/using.md) | What every screen means |
 | [`docs/building.md`](docs/building.md) | Wiring, flashing, enclosures, rebuilding the guides |

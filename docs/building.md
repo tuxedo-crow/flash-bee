@@ -48,6 +48,8 @@ Without reportlab installed, prefix each with `uv run --with reportlab --with pi
 
 ## Solderless enclosure
 
+A possible direction, not printed yet: nothing in this section has been checked on hardware.
+
 `enclosure/flashbee_case.scad` (OpenSCAD, `part` = front, back, lever, fit_test, assembly, exploded). Sliced STL and bgcode for the Core One+ (PETG, 0.20 mm BALANCED) are in `enclosure/exports/`. Outside size 58 x 84.5 x 30 mm. The only soldering left is the four AS3935 bridges (0-3V, REG, CS, SI1). Every JST socket stays on.
 
 Parts:
@@ -80,7 +82,7 @@ Not checked on hardware: the knob travel and the lever fork (from the footprint 
 
 Sliced files for the Prusa Core One HF 0.4 are in `enclosure/exports/` (`flashbee_travel_case_*`), made for a semi-rigid flexible PETG with the Generic PLA Silk profile. Print `fit_test` first: it has one hinge pair and both magnet wells.
 
-Not printed yet: the hinge gaps, the fit around the device and the magnet hold are untested. Open the case gently the first time to break any stringing in the hinge.
+Printed and in use: the hinge, the fit around the device and the magnet clasp all work. Open the case gently the first time to break any stringing in the hinge.
 
 ## Enclosure concept (v3)
 
