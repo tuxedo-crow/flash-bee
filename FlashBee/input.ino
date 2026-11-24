@@ -163,10 +163,12 @@ void setPage(Page p, const char* reason) {
   if (curPage == PAGE_SETTINGS) persistFlush("left settings");
   LOG.printf("[PAGE] %s -> %s (%s)\n", pageName(curPage), pageName(p), reason);
   curPage = p;
+  CRUMB_EVT(CE_PAGE);
 }
 
 // One gesture, from the touch state machine or the test console.
 void dispatchTouch(const TouchEvent &ev) {
+    uiDirty = true;
     switch (ev.type) {
       case EV_LONG_PRESS:
         if (demoActive) exitDemo("touch");
@@ -198,7 +200,7 @@ void dispatchTouch(const TouchEvent &ev) {
 
 void handleTouch() {
   TouchEvent ev;
-  while (popEvent(ev)) dispatchTouch(ev);
+  while (popEvent(ev)) { CRUMB_EVT(CE_TOUCH); dispatchTouch(ev); }
   // Demo also ends by itself after DEMO_TIMEOUT_MS.
   if (demoActive && millis() - demoStartMs >= DEMO_TIMEOUT_MS) exitDemo("timeout");
 }

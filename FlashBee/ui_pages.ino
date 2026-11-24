@@ -283,16 +283,16 @@ void drawRecords() {
   spr.drawString("RESET", CX, BTN_RECRESET.y + 15);
   spr.setTextSize(1);
   spr.setTextColor(C_GREY, C_BG);
-  spr.drawString("RECORDS (HOLD 3 S)", CX, BTN_RECRESET.y + 34);
+  spr.drawString("RECORDS + ALERT (HOLD 3 S)", CX, BTN_RECRESET.y + 34);
   spr.setTextColor(demoActive ? C_DEMO : C_DIM, C_BG);
   spr.drawString(demoActive ? "demo strikes don't count" : "real strikes, ever", CX, 207);
 
   if ((int32_t)(resetMsgUntil - millis()) > 0) {  // confirmation after the hold
-    spr.fillRoundRect(46, 160, 148, 32, 5, C_BG);
-    spr.drawRoundRect(46, 160, 148, 32, 5, C_GREEN);
+    spr.fillRoundRect(34, 152, 172, 48, 6, C_BG);   // covers the button and its note
+    spr.drawRoundRect(34, 152, 172, 48, 6, C_GREEN);
     spr.setTextSize(1);
     spr.setTextColor(C_GREEN, C_BG);
-    spr.drawString("RECORDS RESET", CX, 176);
+    spr.drawString("RECORDS + ALERT RESET", CX, 176);
   }
 }
 

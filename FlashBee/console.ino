@@ -74,7 +74,7 @@ static void conStatus() {
                 realStats.strikeCount, realStats.lastDist, (unsigned long)realStats.lastEnergy,
                 realStats.histCount, n, capped ? "+" : "", tr == TREND_NONE ? "none" : trendText(tr));
   long left = 0;
-  if (realStats.clearRunning) left = (long)((CLEAR_MS - (now - realStats.clearFromMs)) / 1000UL);
+  if (realStats.clearRunning) { uint32_t el = now - realStats.clearFromMs; left = el >= CLEAR_MS ? 0L : (long)((CLEAR_MS - el) / 1000UL); }
   LOG.printf("[STATUS] allclear running=%d show=%d remaining=%lds muted=%d\n", realStats.clearRunning,
                 realStats.clearDoneShow, left, sensorMuted);
   LOG.printf("[STATUS] antenna tunCap=%u lcoHz=%lu saved=%s\n", tunCap, (unsigned long)lcoHz,
@@ -83,15 +83,19 @@ static void conStatus() {
                 (unsigned long)rec.maxEnergy, (unsigned long)rec.stormMax, (unsigned long)rec.total,
                 (unsigned long)rec.storms);
   sleepStatus("[STATUS]");
+  LOG.printf("[STATUS] build %s %s\n", BUILD_GIT, BUILD_DATE);
   LOG.printf("[STATUS] diag boot=%lu crash=%lu lastCrash=%u(%s) heap=%lu burstLeft=%lu\n",
                 (unsigned long)bootCount, (unsigned long)crashCount, lastCrash,
                 lastCrash ? resetName(lastCrash) : "none", (unsigned long)ESP.getFreeHeap(),
                 (unsigned long)burstLeft);
+  if (crumbSaved.magic == CRUMB_MAGIC) { char cb[96]; crumbText(crumbSaved, cb, sizeof(cb)); LOG.printf("[STATUS] crumb %s\n", cb); }
+  else LOG.println("[STATUS] crumb none");
 }
 
 // Screenshot: redraw the current page into the sprite like the next frame, dump it as RGB565 hex.
 static void conShot() {
   static char row[240 * 4 + 1];
+  CRUMB(CS_SHOT);
   drawUIFrame();                                   // same renderer as the loop, without the push
   Serial.setTxTimeoutMs(200);
   Serial.println("[SHOT] begin 240 240");
@@ -105,7 +109,7 @@ static void conShot() {
     Serial.println();
   }
   Serial.println("[SHOT] end");
-  Serial.setTxTimeoutMs(0);
+  Serial.setTxTimeoutMs(1);
 }
 
 static void injectStrike(uint32_t e, uint8_t d) {
@@ -284,6 +288,8 @@ static void conExecInner(char* line) {
 // Every line goes through here, from the serial port or from <pfx>/cmd (conFromMqtt).
 // The raw copy keeps the spaces of wifi / ota / mqtt values and is wiped afterwards (it may hold a password).
 static void conExec(char* line) {
+  CRUMB(CS_CONSOLE);
+  CRUMB_EVT(CE_CMD);
   strlcpy(conRaw, line, sizeof(conRaw));
   if (conFromMqtt && !conMqttAllowed(conRaw)) conErrMqtt();
   else conExecInner(line);

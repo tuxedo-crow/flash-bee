@@ -4,6 +4,7 @@
 //       network (net.ino): wSsid wPass otaPass mHost mPort mUser mPass mPfx haDisc net.
 //       gain and mnl are old keys: the profile decides both now, they are ignored (and left in place).
 //       bootCount, crashCount (u32), lastCrash (u8): restart diagnostics, written once per boot.
+//       crumb (blob, struct Crumb): where the loop was at the last crash; written on a crash boot only.
 //       tunCap (u8 0-15, antenna TUN_CAP; absent = never tuned), lcoHz (u32, LCO measured at that cap).
 //       rClose (u8 km code, 0 = none), rEnergy (u32), rStormMax (u32), rTotal (u32), rStorms (u32).
 // Writes are deferred: a change is written at most once per NVS_MIN_INTERVAL_MS (10 s), only the
@@ -67,6 +68,8 @@ bool recDirty() {
 void persistWrite(const char* why) {
   bool c = cfgDirty(), r = recDirty();
   if (!c && !r) return;
+  CRUMB(CS_PERSIST);
+  CRUMB_EVT(CE_NVS);
   nvsLastWrite = millis();
   if (!prefsOk) { savedCfg = cfg; savedRec = rec; return; }
   if (cfg.miles != savedCfg.miles)   prefs.putUChar("miles", cfg.miles);
@@ -120,7 +123,11 @@ void resetRecords() {
   rec = Records{};
   stormSeen = false;
   stormCount = 0;
-  LOG.println("[REC] reset by 3 s hold on Records");
+  // Also drop the live real-strike session (history, bins, ticker, 30-30 countdown, ALL CLEAR banner), as a
+  // reboot would. The demo's Stats are not touched. alertUpdate() logs the SHELTER/ACTIVITY -> IDLE change.
+  memset(&realStats, 0, sizeof(realStats));
+  LOG.println("[REC] reset (records, strike history and 30-30 countdown cleared)");
+  alertUpdate(millis());
   persistFlush("reset");
   resetMsgUntil = millis() + 2500;
 }
@@ -138,6 +145,8 @@ const char* scrName() { return SCR_NAME[cfg.scr]; }
 
 void screenOff() {
   if (!screenOn) return;
+  CRUMB(CS_SCREEN);
+  CRUMB_EVT(CE_SCR_OFF);
   screenOn = false;
   ledcWrite(BL_PIN, 0);
   tft.writecommand(TFT_CMD_DISPOFF);
@@ -149,10 +158,13 @@ void screenOff() {
 void screenWake(const char* why) {
   lastActMs = millis();
   if (screenOn) return;
+  CRUMB(CS_SCREEN);
+  CRUMB_EVT(CE_SCR_ON);
   tft.writecommand(TFT_CMD_SLPOUT);
   delay(120);                                      // the panel needs 120 ms after SLPOUT
   tft.writecommand(TFT_CMD_DISPON);
   screenOn = true;
+  uiDirty = true;
   drawUI();                                        // a fresh frame before the light comes on
   applyBrightness();
   LOG.printf("[SCREEN] on (%s)\n", why);
@@ -183,12 +195,36 @@ const char* resetName(uint8_t r) {
   }
 }
 
+static const char* const CRUMB_STAGE[CS_COUNT] = { "boot", "console", "touch", "demo", "sensor", "stats", "alert", "screen",
+  "uitick", "battery", "persist", "net", "ota", "profile", "draw", "push", "health", "rest", "sleep", "shot" };
+static const char* const CRUMB_EVTN[CE_COUNT] = { "none", "strike", "touch", "page", "scr-on", "scr-off", "wake", "nvs", "cmd", "ota" };
+
+// "stage=... page=n up=Ns evt=... pass=n net=busy|idle" for a valid crumb.
+void crumbText(const Crumb& c, char* b, size_t n) {
+  snprintf(b, n, "stage=%s page=%u up=%lus evt=%s pass=%lu net=%s",
+           c.stage < CS_COUNT ? CRUMB_STAGE[c.stage] : "?", c.page, (unsigned long)c.upS,
+           c.evt < CE_COUNT ? CRUMB_EVTN[c.evt] : "?", (unsigned long)c.pass, c.net ? "busy" : "idle");
+}
+
 // Once per boot: log the reset reason and keep the counters in NVS.
 void bootDiag() {
   esp_reset_reason_t r = esp_reset_reason();
+  LOG.printf("[BOOT] build %s %s\n", BUILD_GIT, BUILD_DATE);
   LOG.printf("[BOOT] reset reason: %s\n", resetName((uint8_t)r));
   bool crash = (r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT || r == ESP_RST_WDT);
-  if (!prefsOk) return;
+  // The RTC crumb is only trusted after a crash reset with the magic intact; on power-on RTC_NOINIT is garbage.
+  bool crumbOk = crash && crumb.magic == CRUMB_MAGIC && crumb.stage < CS_COUNT && crumb.evt < CE_COUNT;
+  Crumb last = crumb;
+  memset(&crumb, 0, sizeof(crumb));                   // fresh crumb for this boot
+  crumb.magic = CRUMB_MAGIC;
+  if (crumbOk) {
+    char cb[96];
+    crumbText(last, cb, sizeof(cb));
+    LOG.printf("[BOOT] last crumb: %s\n", cb);
+  }
+  if (!prefsOk) { if (crumbOk) crumbSaved = last; return; }
+  if (prefs.getBytesLength("crumb") == sizeof(Crumb)) prefs.getBytes("crumb", &crumbSaved, sizeof(Crumb));
+  if (crumbOk) { crumbSaved = last; prefs.putBytes("crumb", &last, sizeof(Crumb)); }
   bootCount = prefs.getULong("bootCount", 0) + 1;
   crashCount = prefs.getULong("crashCount", 0);
   lastCrash = prefs.getUChar("lastCrash", 0);
@@ -207,7 +243,9 @@ void startWatchdog() {
 // Test console: zero the restart diagnostics (RAM and NVS).
 void diagReset() {
   bootCount = 0; crashCount = 0; lastCrash = 0;
+  memset(&crumbSaved, 0, sizeof(crumbSaved));
   if (prefsOk) {
+    prefs.remove("crumb");
     prefs.putULong("bootCount", 0);
     prefs.putULong("crashCount", 0);
     prefs.putUChar("lastCrash", 0);

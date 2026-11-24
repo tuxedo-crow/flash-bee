@@ -96,6 +96,11 @@ uint8_t tunCap = TUN_CAP_DEFAULT;
 uint32_t lcoHz = 0;             // measured antenna frequency (0 = not measured)
 uint8_t tunSaved = 0xFF;        // TUN_CAP loaded from NVS (0xFF = never tuned)
 bool tuneOk = false;            // the last sweep measured pulses
+bool irqWired = false;          // pulses were measured on IRQ (this boot's sweep, or a saved sweep): D2 is a real IRQ wire
+bool irqHighSeen = false;       // IRQ read HIGH on the last poll pass ...
+uint32_t irqHighUs = 0;         // ... and since when (micros): REG0x03 is read only 2 ms after the edge
+uint32_t sensorReadMs = 0;      // last REG0x03 read (IRQ mode: the slow fallback poll runs from here)
+bool uiDirty = true;            // something changed that a static page must redraw now (see drawUI)
 bool rcoCalOk = false;
 uint8_t calTrco = 0, calSrco = 0;
 uint32_t disturbers = 0;        // since boot
@@ -206,6 +211,11 @@ volatile bool mqttResetReq = false;    // loop -> task: settings changed, reconn
 volatile bool netTaskRun = false;      // loop -> task: WiFi is up and an MQTT host is set
 volatile uint32_t mqttConnSeq = 0;     // task: +1 on every new connection (the loop then republishes discovery and state)
 volatile uint32_t netBusySince = 0;    // task: millis() when the current network call began, 0 = idle (stall guard)
+// Crash breadcrumb: plain stores only. Lives in RTC memory, so a watchdog/panic reset keeps it; power loss does not.
+RTC_NOINIT_ATTR Crumb crumb;
+Crumb crumbSaved = {};                 // the crumb of the last crash (NVS), magic 0 = none
+#define CRUMB(s)     do { crumb.stage = (s); crumb.page = (uint8_t)curPage; crumb.net = netBusySince != 0; } while (0)
+#define CRUMB_EVT(e) (crumb.evt = (e))
 volatile int netSockFd = -1;          // task: socket fd while connected, else -1 (the loop may only shutdown() it)
 volatile uint32_t netStallS = 0;       // test hook `fault netstall <s>`: the task blocks this long
 uint32_t mqttSeenSeq = 0;
@@ -357,6 +367,14 @@ bool maskWrite(uint8_t reg, uint8_t mask, uint8_t val) {
   return writeRegOk(reg, (cur & ~mask) | (val & mask));
 }
 
+// REG0x03 write without a read (a read clears a pending interrupt). Bits 7:6 LCO_FDIV, 5 MASK_DIST, 4 reserved (0).
+bool writeReg3(uint8_t lcoFdiv, uint8_t maskDist) {
+  uint8_t v = (uint8_t)((lcoFdiv << 6) | ((maskDist & 1) << 5));
+  if (!writeRegOk(0x03, v)) return false;
+  reg3Last = (reg3Last & 0x1F) | v;                  // `profile` prints the new MASK_DIST; the INT bits stay as polled
+  return true;
+}
+
 bool readEnergyOk(uint32_t &e) {
   uint8_t lo, mid, hi;
   if (!readRegOk(0x06, hi) || !readRegOk(0x05, mid) || !readRegOk(0x04, lo)) return false;
@@ -482,7 +500,7 @@ void IRAM_ATTR onLcoPulse() { lcoPulses = lcoPulses + 1; }
 // Returns false (cap and hz untouched) when no cap gave a single pulse: IRQ is not connected.
 bool tuneAntenna(uint8_t &bestCap, uint32_t &bestHz) {
   pinMode(IRQ_PIN, INPUT);
-  maskWrite(0x03, 0xC0, 0xC0);              // LCO_FDIV = 128
+  writeReg3(3, PROFILES[profEff].maskDist);   // LCO_FDIV = 128
   uint8_t best = 0;
   uint32_t bestErr = UINT32_MAX, hzBest = 0;
   bool any = false;
@@ -506,7 +524,7 @@ bool tuneAntenna(uint8_t &bestCap, uint32_t &bestHz) {
     if (hz) any = true;
     if (err < bestErr) { bestErr = err; best = cap; hzBest = hz; }
   }
-  maskWrite(0x03, 0xC0, 0x00);              // LCO_FDIV back to 16
+  writeReg3(0, PROFILES[profEff].maskDist);   // LCO_FDIV back to 16
   if (!any) {
     LOG.println("[ANT] no pulses on IRQ - wire not connected? keeping the old TUN_CAP");
     return false;
@@ -598,6 +616,17 @@ void binsAdvance(Stats &S, uint32_t now) {
   }
 }
 
+// millis() wraps after 49.7 days, which would make old strikes look recent. Every pass: drop history older
+// than the longest window (CHART_MS) and cap the age of the last strike at 2^30 ms (12 days), far over STALE_MS.
+void ageCap(Stats &S, uint32_t now) {
+  while (S.histCount > 0) {
+    int idx = (S.histHead - S.histCount + HIST_MAX) % HIST_MAX;      // oldest
+    if (now - S.hist[idx].t <= CHART_MS) break;
+    S.histCount--;
+  }
+  if (now - S.lastStrikeMs > 0x40000000UL) S.lastStrikeMs = now - 0x40000000UL;
+}
+
 // -- 30-30 all-clear -------------------------------------------------------
 void clearOnStrike(Stats &S, uint8_t d, uint32_t now, bool demo) {
   if (d == DIST_OOR || d == DIST_UNKNOWN || d > CLEAR_KM) return;   // no usable distance: cannot start the 30-30 countdown
@@ -621,6 +650,7 @@ void clearTick(Stats &S, uint32_t now, bool demo) {
 
 // Record one strike (real or demo) and flash the screen.
 void recordStrike(uint32_t e, uint8_t d) {
+  CRUMB_EVT(CE_STRIKE);
   uint32_t now = millis();
   screenWake("strike");                  // before the flash, so the flash is seen
   st->strikeCount++;
@@ -662,6 +692,7 @@ void recordStrike(uint32_t e, uint8_t d) {
 
 // A real strike (sensor or test console): ends demo, records it, updates records, jumps to Main.
 void onRealStrike(uint32_t e, uint8_t d) {
+  uiDirty = true;
   if (demoActive) exitDemo("real strike");   // real data wins: record it into realStats
   recordStrike(e, d);
   recordsOnStrike(e, d, millis());
@@ -717,6 +748,7 @@ void demoTick() {
 // -- Flash on lightning ----------------------------------------------------
 void flashScreen() {
   if (!screenOn) { lastFlashMs = millis(); return; }
+  CRUMB(CS_PUSH);
   for (int i = 0; i < 2; i++) {
     spr.fillSprite(0x2945);
     spr.pushSprite(0, 0);
@@ -766,6 +798,8 @@ bool initSensor(bool tune) {
     uint8_t cap = tunCap;
     uint32_t hz = lcoHz;
     tuneOk = tuneAntenna(cap, hz);
+    irqWired = tuneOk;
+    pinMode(IRQ_PIN, INPUT);                         // plain input again (the sweep attached and detached an ISR)
     if (tuneOk) { tunCap = cap; lcoHz = hz; saveTune(); }
   }
 #else
@@ -782,7 +816,7 @@ bool initSensor(bool tune) {
   noiseFault = false;
   maskWrite(0x01, 0x7F, (noiseFloor << 4) | watchdog);
   maskWrite(0x02, 0x0F, spikeRej);
-  maskWrite(0x03, 0xE0, pd.maskDist << 5);           // LCO_FDIV 16, MASK_DIST per profile
+  writeReg3(0, pd.maskDist);                        // LCO_FDIV 16, MASK_DIST per profile
   applyMnl();
 
   senseLastAdj = nfLastAdj = millis();
@@ -796,8 +830,10 @@ void setup() {
   Serial.begin(115200);
   // Never block the UI on USB logging. With USB plugged into a computer that is not reading the port,
   // the HWCDC TX buffer fills and each print blocks for tx_timeout_ms (100 ms) x 20 retries = ~2 s.
-  // Timeout 0 drops the output instead when no host reads it.
-  Serial.setTxTimeoutMs(0);
+  // Use 1 ms, never 0: HWCDC::write (core 3.3.7) counts `tries = tx_timeout_ms` down with `tries--` before
+  // testing `tries == 0`, so 0 wraps to 2^32 and a full buffer spins ~49 days (TASK_WDT reboot). With 1 it
+  // gives up after 1 ms, marks the host as not reading, and later prints are dropped until it reads again.
+  Serial.setTxTimeoutMs(1);
   tft.init();                    // also drives TFT_BL HIGH and starts Wire for touch
   tft.fillScreen(C_BG);          // rotation is applied after loadPrefs() below
   // The sprite is one 115,200-byte block. With WiFi linked the largest free block is only 114,676 bytes (the heap
@@ -805,9 +841,11 @@ void setup() {
   // The missing bottom rows (the glass is only ~40 px wide there) stay black from the fillScreen above.
   size_t heapBefore = ESP.getMaxAllocHeap();
   sprH = 240;
-  while (sprH > 200 && !spr.createSprite(240, sprH)) sprH--;
+  while (!spr.createSprite(240, sprH) && sprH > 200) sprH--;   // 240 down to 200 inclusive
   spr.setTextFont(1);
-  LOG.printf("[BOOT] sprite 240x%u (largest free block was %lu, now %lu, free %lu)\n", (unsigned)sprH,
+  if (!spr.created()) LOG.printf("[BOOT] sprite FAILED (largest free block was %lu, now %lu, free %lu)\n",
+                                 (unsigned long)heapBefore, (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)ESP.getFreeHeap());
+  else LOG.printf("[BOOT] sprite 240x%u (largest free block was %lu, now %lu, free %lu)\n", (unsigned)sprH,
              (unsigned long)heapBefore, (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)ESP.getFreeHeap());
   pinMode(TOUCH_PIN, INPUT_PULLUP);
 #if USE_IRQ_TUNING
@@ -823,6 +861,7 @@ void setup() {
   tft.setRotation(cfg.rot);      // saved screen rotation (touch is mapped to match in readTouchXY)
   tft.fillScreen(C_BG);
   bootDiag();
+  CRUMB(CS_BOOT);
   // Backlight PWM after tft.init(), which set the pin as a plain HIGH output.
   if (!ledcAttach(BL_PIN, BL_PWM_HZ, BL_PWM_BITS)) LOG.println("[SET] backlight PWM attach failed");
   applyBrightness();
@@ -860,6 +899,7 @@ void setup() {
   }
   LOG.println(sensorBus == BUS_SD ? "[AS3935] Found on microSD slot (D2/D9)" : "[AS3935] Found on D4/D5");
 
+  irqWired = tunSaved != 0xFF;                       // a saved cap means an earlier sweep measured pulses
   initSensor(tunSaved == 0xFF);                      // sweep once if never tuned, else apply the saved cap
 
   // Boot status
@@ -877,15 +917,16 @@ void setup() {
 // INT_NH stays asserted while noisy: rate-limit raises, but keep postponing recovery/decay.
 void onNoiseHigh() {
   if (millis() - nfLastRaise >= NF_RAISE_INTERVAL) {
+    bool atMax = noiseFloor >= NF_MAX;               // before the raise: 6 -> 7 is not a fault yet
     LOG.println("[NH] Noise floor too high");
     noiseEvents++;
     raiseNoiseFloor();
     nfLastRaise = millis();
-  }
-  // INT_NH with the floor already at its maximum: the datasheet says the chip cannot work properly.
-  if (noiseFloor >= NF_MAX && !noiseFault) {
-    noiseFault = true;
-    LOG.println("[NH] noise fault - readings not trustworthy");
+    // INT_NH with the floor already at its maximum: the datasheet says the chip cannot work properly.
+    if (atMax && !noiseFault) {
+      noiseFault = true;
+      LOG.println("[NH] noise fault - readings not trustworthy");
+    }
   }
   senseLastAdj = millis();
   nfLastAdj = millis();
@@ -899,8 +940,35 @@ void onDisturber() {
   // silent: no flash, no screen update
 }
 
-void pollSensor() {
+// REG0x03 is read every loop pass, except in IRQ mode: wire on D2 proven by the antenna sweep, sensor on the
+// D4/D5 bus. Then it is read only when IRQ is HIGH and has been for AS3935_IRQ_WAIT_US (datasheet: wait 2 ms),
+// or every IRQ_FALLBACK_MS as a net for a missed edge and for the I2C health check. INT_NH holds IRQ high while
+// noisy: that reads every pass, as before, and onNoiseHigh rate-limits itself.
+#define IRQ_FALLBACK_MS 500UL
+static bool irqModeActive() {
+#if USE_IRQ_TUNING
+  return irqWired && sensorBus == BUS_WIRE;
+#else
+  return false;
+#endif
+}
+
+// Decay timers: independent of REG0x03, run on every sensor tick.
+static void sensorDecay() {
+  uint32_t now = millis();
+  if (now - senseLastAdj > SENSE_RECOVER_INTERVAL) {
+    senseLastAdj = now;
+    resensitize();
+  }
+  if (now - nfLastAdj > NF_DECAY_INTERVAL) {
+    nfLastAdj = now;
+    lowerNoiseFloor();
+  }
+}
+
+static void readInterrupt() {
   uint8_t intReg;
+  sensorReadMs = millis();
   if (!readRegOk(0x03, intReg)) { reg3Ok = false; return; }   // failure counted; 0xFF must not look like an event
   reg3Last = intReg;                                 // the config check reads MASK_DIST from here
   reg3Ok = true;
@@ -922,16 +990,23 @@ void pollSensor() {
     if (sensorMuted) LOG.printf("[MUTED] sensor strike ignored: %u km, energy %lu\n", d, (unsigned long)e);
     else onRealStrike(e, d);
   }
+}
 
-  // Recover sensitivity after quiet periods
-  if (millis() - senseLastAdj > SENSE_RECOVER_INTERVAL) {
-    senseLastAdj = millis();
-    resensitize();
+void pollSensor() {
+  if (irqModeActive()) {
+    uint32_t nowUs = micros();
+    bool high = digitalRead(IRQ_PIN) == HIGH;
+    if (!high) irqHighSeen = false;
+    else if (!irqHighSeen) { irqHighSeen = true; irqHighUs = nowUs; }
+    bool irqReady = high && (uint32_t)(nowUs - irqHighUs) >= AS3935_IRQ_WAIT_US;
+    if (irqReady || (!high && millis() - sensorReadMs >= IRQ_FALLBACK_MS)) {   // fallback never inside the 2 ms
+      readInterrupt();
+      irqHighSeen = false;                           // still HIGH next pass (e.g. noise): wait 2 ms again
+    }
+  } else {
+    readInterrupt();
   }
-  if (millis() - nfLastAdj > NF_DECAY_INTERVAL) {
-    nfLastAdj = millis();
-    lowerNoiseFloor();
-  }
+  sensorDecay();
 }
 
 // -- Sensor link: lost detection, recovery, config read-back ---------------------
@@ -976,7 +1051,8 @@ void sensorTick(uint32_t now) {
 // -- Reset filters ---------------------------------------------------------------
 // Noise floor, WD and SR back to their minimums, chip statistics cleared (REG0x02 bit 6 CL_STAT
 // high-low-high, per the datasheet). MNL stays. The 30-30 countdown and the alert stage are NOT touched:
-// no button may pretend it is safe.
+// no filter button may pretend it is safe. The 3 s hold on Records (resetRecords) is the one deliberate way
+// to clear them.
 void resetFilters() {
   noiseFloor = NF_DEFAULT;
   watchdog = PROFILES[profEff].wd;
@@ -1036,6 +1112,7 @@ void alertUpdate(uint32_t now) {
   LOG.printf("[ALERT] %s -> %s (%s%s)\n", alertName(alertStage), alertName(next), why, demoActive ? ", demo" : "");
   bool toShelter = next == ALERT_SHELTER;
   alertStage = next;
+  uiDirty = true;
   if (toShelter) screenWake("shelter");
 }
 
@@ -1043,31 +1120,47 @@ void alertUpdate(uint32_t now) {
 void loop() {
   loopStartUs = micros();
   esp_task_wdt_reset();
+  CRUMB(CS_CONSOLE);
   consolePoll();
-  uptimeMs();                    // keeps the 64-bit uptime counter across millis wraps
+  crumb.pass++;
+  crumb.upS = (uint32_t)(uptimeMs() / 1000ULL);   // also keeps the 64-bit uptime counter across millis wraps
+  CRUMB(CS_TOUCH);
   touchPoll();
   handleTouch();
 
-  if (demoActive) demoTick();
+  if (demoActive) { CRUMB(CS_DEMO); demoTick(); }
+  CRUMB(CS_SENSOR);
   sensorTick(millis());
 
+  CRUMB(CS_STATS);
   uint32_t now = millis();
   binsAdvance(realStats, now);
+  ageCap(realStats, now);
   clearTick(realStats, now, false);
   if (demoActive) {
     binsAdvance(demoStats, now);
+    ageCap(demoStats, now);
     clearTick(demoStats, now, true);
   }
+  CRUMB(CS_ALERT);
   alertUpdate(now);
+  CRUMB(CS_SCREEN);
   screenTick(now);
+  CRUMB(CS_UITICK);
   f2bTick(now);
   navTick(now);
+  CRUMB(CS_BATT);
   battTick(now);
+  CRUMB(CS_PERSIST);
   persistTick(now);
+  CRUMB(CS_NET);
   netTick(now);
+  CRUMB(CS_PROFILE);
   profileTick(now);
 
+  CRUMB(CS_DRAW);
   drawUI();
+  CRUMB(CS_HEALTH);
   healthTick(millis(), micros() - loopStartUs);
   restOrSleep();                 // 50 ms of touch sampling, or one light sleep (power.ino)
 }

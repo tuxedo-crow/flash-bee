@@ -574,7 +574,7 @@ def guide_story(toc):
             "<b>all strikes</b> ever, and <b>number of storms</b>. A new storm starts when there has been no strike for "
             "30 minutes. Records are kept when you switch off. Demo strikes never count. To clear them, "
             "<b>hold your finger on the RESET button at the bottom of this page for 3 seconds</b> until the bar fills "
-            "and it says RECORDS RESET. A quick tap does nothing, so a stray touch cannot erase them."),
+            "and it says RECORDS + ALERT RESET. This also clears the alert and the 30-minute countdown. A quick tap does nothing, so a stray touch cannot erase them."),
           KeepTogether([P("5. Settings", H2),
                         P("Tap a button to change it. Your choices are saved within about 10 seconds and kept when "
                           "you switch off."),

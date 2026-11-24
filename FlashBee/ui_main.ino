@@ -205,7 +205,8 @@ void drawAlertLabel(const Stats &S, uint32_t now) {
   int anyN, nearN;
   alertCounts(S, now, anyN, nearN);
   if (S.clearRunning) {
-    uint32_t left = (CLEAR_MS - (now - S.clearFromMs) + 999) / 1000;   // round up: starts at 30:00
+    uint32_t el = now - S.clearFromMs;
+    uint32_t left = el >= CLEAR_MS ? 0 : (CLEAR_MS - el + 999) / 1000;   // round up: starts at 30:00
     snprintf(lb, sizeof(lb), "ALL CLEAR IN %02lu:%02lu", (unsigned long)(left / 60), (unsigned long)(left % 60));
     lc = demoActive ? C_DEMO : C_REDORG;
   } else if (alertStage == ALERT_SHELTER) {
@@ -356,7 +357,9 @@ void drawMain() {
     // normal distance: size 6 number + size 3 unit
     spr.setTextColor(distCol, C_BG);
     spr.setTextSize(6);
-    spr.drawString(String(distForDisplay(S.lastDist)), CX, 80);
+    char db[12];
+    snprintf(db, sizeof(db), "%d", distForDisplay(S.lastDist));
+    spr.drawString(db, CX, 80);
     spr.setTextColor(distCol, C_BG);
     spr.setTextSize(3);
     spr.drawString(distUnit(), CX, 112);
@@ -383,7 +386,9 @@ void drawMain() {
   }
   spr.setTextColor(C_GOLD, C_BG);
   spr.setTextSize(2);
-  spr.drawString(String(S.strikeCount), 40, 156);
+  char sb[16];
+  snprintf(sb, sizeof(sb), "%lu", (unsigned long)S.strikeCount);
+  spr.drawString(sb, 40, 156);
 
   // Energy (right)
   spr.setTextDatum(MR_DATUM);
@@ -453,8 +458,25 @@ void drawUIFrame() {                 // render the current page into the sprite 
   if (holdFeedbackWanted()) drawHoldOverlay(spr);
 }
 
+// Frame pacing. Main animates every frame (rings, flash, blink, border), so it redraws every pass. Every other
+// page is static apart from clocks, countdowns and the 1 Hz SHELTER blink: it redraws when `uiDirty` is set
+// (touch event, strike, alert change, screen wake), while a finger is down (hold overlay), and otherwise at
+// least every UI_STATIC_MS as the safety net, so no value can stay stale longer than that.
+#define UI_STATIC_MS 250UL
 void drawUI() {
   if (!screenOn) return;                // nothing to draw: the panel is asleep
+  static uint32_t lastDrawMs = 0;
+  static int8_t lastPage = -1;
+  static bool lastLive = false;
+  uint32_t now = millis();
+  bool live = ts.down || evCount;       // finger on the glass: hold overlay progress, press feedback
+  if (curPage != PAGE_MAIN && !uiDirty && !live && !lastLive && lastPage == (int8_t)curPage
+      && now - lastDrawMs < UI_STATIC_MS) return;
+  uiDirty = false;
+  lastDrawMs = now;
+  lastPage = (int8_t)curPage;
+  lastLive = live;
   drawUIFrame();
+  CRUMB(CS_PUSH);
   spr.pushSprite(0, 0);
 }

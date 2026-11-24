@@ -4,6 +4,15 @@
 #pragma once
 #include <Arduino.h>
 
+// Build stamp: flash.sh (stamp.sh) writes build_stamp.h with BUILD_GIT and BUILD_DATE. A plain Arduino IDE build
+// has no such file and falls back to "nogit" plus the compiler's local date and time.
+#if __has_include("build_stamp.h")
+#include "build_stamp.h"
+#else
+#define BUILD_GIT  "nogit"
+#define BUILD_DATE __DATE__ " " __TIME__
+#endif
+
 // -- Display -------------------------------------------------------------
 #define CX 120
 #define CY 120
@@ -216,6 +225,19 @@ enum SensorBus : uint8_t { BUS_NONE, BUS_WIRE, BUS_SD };
 enum AlertStage : uint8_t { ALERT_IDLE, ALERT_ACTIVITY, ALERT_SHELTER };
 
 enum Trend { TREND_NONE, TREND_APPROACH, TREND_AWAY, TREND_STEADY };
+
+// Crash breadcrumb (RTC_NOINIT, survives watchdog/panic resets). Stage = where the loop is, evt = last notable event.
+#define CRUMB_MAGIC 0xF1A5BEE1UL
+enum CrumbStage : uint8_t { CS_BOOT, CS_CONSOLE, CS_TOUCH, CS_DEMO, CS_SENSOR, CS_STATS, CS_ALERT, CS_SCREEN, CS_UITICK,
+                            CS_BATT, CS_PERSIST, CS_NET, CS_OTA, CS_PROFILE, CS_DRAW, CS_PUSH, CS_HEALTH, CS_REST,
+                            CS_SLEEP, CS_SHOT, CS_COUNT };
+enum CrumbEvt : uint8_t { CE_NONE, CE_STRIKE, CE_TOUCH, CE_PAGE, CE_SCR_ON, CE_SCR_OFF, CE_WAKE, CE_NVS, CE_CMD, CE_OTA, CE_COUNT };
+struct Crumb {
+  uint32_t magic;       // CRUMB_MAGIC while valid
+  uint32_t pass;        // loop passes since boot
+  uint32_t upS;         // uptime seconds at the start of the last pass
+  uint8_t stage, page, evt, net;   // net = 1 when the net task was inside a network call (netBusySince != 0)
+};
 
 enum Page : uint8_t { PAGE_MAIN, PAGE_CHART, PAGE_F2B, PAGE_RECORDS, PAGE_SETTINGS, PAGE_NERD, PAGE_COUNT };
 

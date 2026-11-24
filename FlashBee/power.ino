@@ -77,6 +77,7 @@ static void lightSleepOnce() {
   bool irqHigh = gpio_get_level(irq) == 1;
   bool touchLow = gpio_get_level(tp) == 0;
 
+  CRUMB_EVT(CE_WAKE);
   slpCount++; slpUs += us;
   slpWinN++; slpWinUs += us;
   if (err != ESP_OK)                         slpWOther++;
@@ -91,8 +92,12 @@ static void lightSleepOnce() {
   // so the next touchPoll() starts a press and wakes the screen (that press does nothing else).
   bool gpioWake = err == ESP_OK && cause == ESP_SLEEP_WAKEUP_GPIO;
   if (gpioWake && (touchLow || !irqHigh)) { ts.lastLowMs = millis(); ts.seen = true; }
-  // IRQ: the next pass polls REG0x03 at once (sensorTick has no throttle); give the chip its 2 ms first.
-  if (irqHigh) delayMicroseconds(AS3935_IRQ_WAIT_US);
+  // IRQ: the next pass reads REG0x03 at once; give the chip its 2 ms first and tell pollSensor it is done.
+  if (irqHigh) {
+    delayMicroseconds(AS3935_IRQ_WAIT_US);
+    irqHighSeen = true;                              // pollSensor sees the wait as done and reads REG0x03 at once
+    irqHighUs = micros() - AS3935_IRQ_WAIT_US;
+  }
 
   uint32_t now = millis();
   if (now - slpWinMs >= SLEEP_LOG_MS) {
@@ -109,8 +114,9 @@ void restOrSleep() {
   uint32_t now = millis();
   if (usb_serial_jtag_is_connected()) usbSeenMs = now;
   if (now - usbListenMs >= SLEEP_LISTEN_EVERY_MS) usbListenMs = now;
-  if (sleepBlocker(now)) { waitSampling(50); return; }
+  if (sleepBlocker(now)) { CRUMB(CS_REST); waitSampling(50); return; }
 #if USE_IRQ_TUNING
+  CRUMB(CS_SLEEP);
   lightSleepOnce();
 #endif
 }
