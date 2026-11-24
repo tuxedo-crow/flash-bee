@@ -43,9 +43,11 @@ static void conHelp() {
   LOG.println("[CON] profile [auto|station|portable|stormchase]  (stormchase is never saved)");
   LOG.println("[CON] wifi [ssid <name>|pass <pw>|on|off|forget] | ota [pass <pw>|forget] | ha [on|off]");
   LOG.println("[CON] mqtt [host|port|user|pass|prefix <value>|forget|dump] | mqttcmd <line> (test: run a line as if from MQTT)");
+  LOG.println("[CON] splash | splash <text up to 31 chars> | splash off | splash show  (boot dedication line, saved; show = draw it for 5 s)");
   LOG.println("[CON] tune  (sweep the antenna cap on the IRQ wire, save it, ~4 s)");
   LOG.println("[CON] sleep | sleep on|off | sleep usb on|off  (light sleep while the screen is off; usb on = test: sleep with a USB host; not saved)");
   LOG.println("[CON] fault i2c on|off | fault nh | fault cfg | fault netstall <s>");
+  LOG.println("[CON] heaplow | heaplow reset  (minimum-free-heap lows: when, which stage, what the net task did)");
   LOG.println("[CON] diag reset | factory flush hang shot rst");
   LOG.println("[CON] km codes: 0 (unknown) 1 5 6 8 10 12 14 17 20 24 27 31 34 37 40 63 (out of range); energy 0..2097151");
 }
@@ -90,6 +92,7 @@ static void conStatus() {
                 (unsigned long)burstLeft);
   if (crumbSaved.magic == CRUMB_MAGIC) { char cb[96]; crumbText(crumbSaved, cb, sizeof(cb)); LOG.printf("[STATUS] crumb %s\n", cb); }
   else LOG.println("[STATUS] crumb none");
+  heapLowPrint("[STATUS]");
 }
 
 // Screenshot: redraw the current page into the sprite like the next frame, dump it as RGB565 hex.
@@ -136,6 +139,17 @@ static void conExecInner(char* line) {
 
   if (IS("help")) { conHelp(); conOk("help"); }
   else if (IS("status")) { conStatus(); conOk("status"); }
+  else if (IS("heaplow")) {
+    if (n == 1) { heapLowPrint("[CON]"); conOk("heaplow"); }
+    else if (n == 2 && strcasecmp(tok[1], "reset") == 0) {
+      heapRecClear();
+      memset(&heapFail, 0, sizeof(heapFail));
+      heapFail.magic = HEAPLOW_MAGIC;
+      heapFailSeen = 0;
+      conOk("heaplow reset");
+    }
+    else conErr("heaplow [reset]");
+  }
   else if (IS("strike")) {
     if (n != 3 || !parseInt(tok[1], 0, 63, a) || !validDist(a)) { conErr("strike <km code> <energy 0..2097151>"); return; }
     if (!parseInt(tok[2], 0, 2097151, b)) { conErr("energy out of range 0..2097151"); return; }
@@ -162,6 +176,29 @@ static void conExecInner(char* line) {
     else if (n == 2 && !strcmp(tok[1], "off")) sensorMuted = false;
     else { conErr("mute on|off"); return; }
     conOk("mute");
+  }
+  else if (IS("splash")) {
+    const char* rest = conRest(conRaw, 1);
+    char txt[40];
+    strlcpy(txt, rest, sizeof(txt));
+    for (int i = (int)strlen(txt) - 1; i >= 0 && (txt[i] == ' ' || txt[i] == '\t' || txt[i] == '\r'); i--) txt[i] = '\0';
+    if (!*txt) {
+      if (splashText[0]) LOG.printf("[SPLASH] text=\"%s\"\n", splashText); else LOG.println("[SPLASH] none");
+    } else if (!strcasecmp(txt, "show")) {
+      screenWake("console");
+      lastTouchMs = millis();                       // keep the 2-min idle return from jumping pages under it
+      splashUntil = millis() + 5000;
+      uiDirty = true;
+    } else if (!strcasecmp(txt, "off")) {
+      splashText[0] = '\0';
+      if (prefsOk) prefs.remove("splash");
+    } else if (strlen(rest) > 31 || strlen(txt) > 31) {
+      conErr("splash text is at most 31 chars"); return;
+    } else {
+      strlcpy(splashText, txt, sizeof(splashText));
+      if (prefsOk) prefs.putString("splash", splashText);
+    }
+    conOk("splash");
   }
   else if (IS("tune")) {
 #if USE_IRQ_TUNING
@@ -322,6 +359,105 @@ void consolePoll() {
     burstNextMs = millis() + burstIntervalMs;
     injectStrike(e, d);
     if (burstLeft == 0) LOG.println("[CON] burst done");
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Heap low-water diagnostics: when and what ran each time the minimum free heap falls (ring in RTC memory)
+// ---------------------------------------------------------------------------------------------------------
+static const char* const NETOP_NAME[NOP_COUNT] = { "none", "stall", "stop", "reset", "mqtt.loop", "publish", "connect", "hello" };
+
+static uint32_t heapRecSum() {
+  const uint8_t* p = (const uint8_t*)&heapRec + 8;
+  uint32_t s = 0;
+  for (size_t i = 0; i < sizeof(HeapRec) - 8; i++) s = s * 31 + p[i];
+  return s;
+}
+
+// True when the RTC record holds usable data (magic, checksum, sane index).
+bool heapRecValid() {
+  return heapRec.magic == HEAPLOW_MAGIC && heapRec.head < HEAPLOW_N && heapRec.sum == heapRecSum();
+}
+
+void heapRecClear() {
+  memset(&heapRec, 0, sizeof(heapRec));
+  heapRec.magic = HEAPLOW_MAGIC;
+  heapRec.sum = heapRecSum();
+}
+
+// Failed-alloc hook: plain stores only (it can run from any task, with the heap lock held).
+void heapFailCb(size_t size, uint32_t caps, const char* fn) {
+  (void)fn;
+  heapFail.count++;
+  heapFail.lastSize = (uint32_t)size;
+  heapFail.lastCaps = caps;
+  heapFail.lastUpS = (uint32_t)(esp_timer_get_time() / 1000000LL);
+}
+
+// One entry as text, for [BOOT] heaplow, `heaplow` and `status`.
+static void heapLowText(const HeapLow& h, char* b, size_t n) {
+  snprintf(b, n, "boot=%u up=%lus min=%lu free=%lu maxblk=%lu stage=%s prev=%s net=%s/%s wifi=%s rssi=%d mqtt=%u logq=%u outq=%u drop=%lu",
+           h.boot, (unsigned long)h.upS, (unsigned long)h.minFree, (unsigned long)h.freeNow, (unsigned long)h.maxBlk,
+           h.stage < CS_COUNT ? crumbStageName(h.stage) : "?", h.prevStage < CS_COUNT ? crumbStageName(h.prevStage) : "?",
+           h.netBusy ? "busy" : "idle", h.netOp < NOP_COUNT ? NETOP_NAME[h.netOp] : "?",
+           h.wifi < 4 ? WIFI_NAME[h.wifi] : "?", h.rssi, h.mqtt, h.logq, h.outq, (unsigned long)h.drop);
+}
+
+// Print the ring, oldest first. tag is "[STATUS]", "[BOOT]" or "[CON]".
+void heapLowPrint(const char* tag) {
+  if (!heapRecValid()) { LOG.printf("%s heaplow none\n", tag); return; }
+  bool fo = heapFail.magic == HEAPLOW_MAGIC;
+  LOG.printf("%s heaplow count=%lu fails=%lu lastfail=%lu@%lus\n", tag, (unsigned long)heapRec.count,
+             (unsigned long)(fo ? heapFail.count : 0), (unsigned long)(fo ? heapFail.lastSize : 0),
+             (unsigned long)(fo ? heapFail.lastUpS : 0));
+  uint32_t n = heapRec.count < HEAPLOW_N ? heapRec.count : HEAPLOW_N;
+  for (uint32_t i = 0; i < n; i++) {
+    const HeapLow& h = heapRec.e[(heapRec.head + HEAPLOW_N - n + i) % HEAPLOW_N];
+    char b[220];
+    heapLowText(h, b, sizeof(b));
+    LOG.printf("%s heaplow[%lu] %s\n", tag, (unsigned long)i, b);
+  }
+}
+
+// Called three times per loop() pass (start, after the net tick, after the draw): one call and a compare unless a new
+// low was reached. The stage the crumb holds now and at the previous call bracket the code that took the memory.
+// Prints only from here (the loop task), never from the callback or the net task.
+void heapWatch() {
+  uint8_t stage = crumb.stage, prev = heapPrevStage;
+  heapPrevStage = stage;
+  uint32_t m = (uint32_t)esp_get_minimum_free_heap_size();
+  if (m < heapLastMin && heapLastMin - m >= HEAPLOW_STEP) {
+    heapLastMin = m;
+    if (!heapRecValid()) heapRecClear();
+    HeapLow& h = heapRec.e[heapRec.head];
+    h.upS = (uint32_t)(uptimeMs() / 1000ULL);
+    h.minFree = m;
+    h.freeNow = (uint32_t)esp_get_free_heap_size();
+    h.maxBlk = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    h.drop = LOG.dropped;
+    h.boot = (uint16_t)bootCount;
+    h.stage = stage;
+    h.prevStage = prev;
+    h.netBusy = netBusySince != 0;
+    h.netOp = netOp < NOP_COUNT ? netOp : 0;
+    h.wifi = (uint8_t)wifiState;
+    h.mqtt = mqttState == MQTT_ST_UP;
+    h.logq = LOG.count;
+    h.outq = netOutQ ? (uint8_t)uxQueueMessagesWaiting(netOutQ) : 0;
+    h.rssi = wifiState == WIFI_ST_UP ? (int8_t)WiFi.RSSI() : 0;
+    h.pad = 0;
+    heapRec.head = (heapRec.head + 1) % HEAPLOW_N;
+    heapRec.count++;
+    heapRec.sum = heapRecSum();
+    LOG.printf("[HEAP] low %lu free=%lu maxblk=%lu up=%lu stage=%s prev=%s net=%s/%s wifi=%s rssi=%d mqtt=%u logq=%u outq=%u drop=%lu\n",
+               (unsigned long)m, (unsigned long)h.freeNow, (unsigned long)h.maxBlk, (unsigned long)h.upS,
+               crumbStageName(h.stage), crumbStageName(h.prevStage), h.netBusy ? "busy" : "idle", NETOP_NAME[h.netOp],
+               WIFI_NAME[h.wifi], h.rssi, h.mqtt, h.logq, h.outq, (unsigned long)h.drop);
+  }
+  if (heapFail.count != heapFailSeen) {
+    heapFailSeen = heapFail.count;
+    LOG.printf("[HEAP] alloc failed size=%lu caps=0x%lx count=%lu up=%lu\n", (unsigned long)heapFail.lastSize,
+               (unsigned long)heapFail.lastCaps, (unsigned long)heapFail.count, (unsigned long)heapFail.lastUpS);
   }
 }
 

@@ -375,7 +375,7 @@ static void netTaskFn(void*) {
     if (netStallS) {                                    // test hook: block inside the net task
       uint32_t sec = netStallS;
       netStallS = 0;
-      netBusySince = now ? now : 1;
+      netBusySince = now ? now : 1; netOp = 1;
       tlog("[MQTT] test: net task blocked for %lu s", (unsigned long)sec);
       vTaskDelay(pdMS_TO_TICKS(sec * 1000UL));
       netBusySince = 0;
@@ -383,7 +383,7 @@ static void netTaskFn(void*) {
     }
     if (!netTaskRun) {                                  // WiFi down, or no host: be offline
       if (mqttState == MQTT_ST_UP || netClient.connected()) {
-        netBusySince = now ? now : 1;
+        netBusySince = now ? now : 1; netOp = 2;
         if (mqtt.connected()) { mqtt.publish(s.avail, "offline", true); mqtt.disconnect(); }
         netStop();
         netBusySince = 0;
@@ -394,7 +394,7 @@ static void netTaskFn(void*) {
     }
     if (mqttResetReq) {
       mqttResetReq = false;
-      netBusySince = now ? now : 1;
+      netBusySince = now ? now : 1; netOp = 3;
       if (mqtt.connected()) mqtt.disconnect();
       netStop();
       netBusySince = 0;
@@ -405,13 +405,13 @@ static void netTaskFn(void*) {
     }
     if (mqtt.connected()) {
       uint32_t t0 = millis();
-      netBusySince = t0 ? t0 : 1;
+      netBusySince = t0 ? t0 : 1; netOp = 4;
       mqtt.loop();                                      // PINGREQ, incoming messages
       netBusySince = 0;
       if (netStalled(t0, "mqtt.loop", nextMs, backoff)) continue;
       while (mqtt.connected() && xQueueReceive(netOutQ, &m, 0) == pdTRUE) {
         t0 = millis();
-        netBusySince = t0 ? t0 : 1;
+        netBusySince = t0 ? t0 : 1; netOp = 5;
         mqtt.publish(m.topic, m.payload, m.len, m.retain != 0);
         netBusySince = 0;
         if (netStalled(t0, "publish", nextMs, backoff)) break;
@@ -433,7 +433,7 @@ static void netTaskFn(void*) {
     // -- one connection attempt: resolve (blocking is fine here), TCP connect <= 1.5 s, CONNACK <= 2 s
     mqttState = MQTT_ST_RESOLVING;
     uint32_t t0 = millis();
-    netBusySince = t0 ? t0 : 1;
+    netBusySince = t0 ? t0 : 1; netOp = 6;
     IPAddress target;
     bool have = target.fromString(s.host);
     if (!have && ipOk && now - ipMs < MQTT_DNS_CACHE_MS && !strcmp(ipHost, s.host)) { target = ip; have = true; }
@@ -469,7 +469,7 @@ static void netTaskFn(void*) {
     }
     backoff = MQTT_BACKOFF_MIN;
     while (xQueueReceive(netOutQ, &m, 0) == pdTRUE) {}  // anything queued for the old connection is stale
-    netBusySince = millis() ? millis() : 1;
+    netBusySince = millis() ? millis() : 1; netOp = 7;
     mqtt.publish(s.cmd, (const uint8_t*)"", 0, true);   // clear a retained command before it can replay
     mqtt.subscribe(s.cmd);
     mqtt.publish(s.avail, "online", true);
@@ -580,6 +580,10 @@ static void wifiBegin() {
     WiFi.setHostname(devHost);
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(false);                     // we drive the retries (backoff), the driver does not
+    // Modem power save off: with it on, the AP holds broadcast/multicast frames until each DTIM beacon and the
+    // driver takes them in one burst of 2312-byte RX buffers (32 allowed), which can use up the ~45 KB free heap.
+    // Light sleep is already blocked while the radio is on (power.ino), so this costs only radio current.
+    WiFi.setSleep(false);
     wifiRadioOn = true;
   }
   WiFi.begin(ncfg.ssid, ncfg.pass[0] ? ncfg.pass : nullptr);

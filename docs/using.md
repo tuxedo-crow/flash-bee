@@ -2,7 +2,7 @@
 
 What the screens mean and what to do when it warns you. The same material, with pictures, is in `Flash Bee Quick Start.pdf` and `Flash Bee Guide.pdf`.
 
-**Turning it on and off.** Slide the switch on the bottom of the case. The screen lights up and the device starts listening for lightning. Slide it back to switch off.
+**Turning it on and off.** Slide the switch on the bottom of the case. The screen shows the FLASH BEE splash (with the owner's line under it, if one is set) and the device starts listening for lightning. Slide it back to switch off.
 
 **Pages.** Swipe left or right across the screen to change pages. The dots at the bottom show where you are. If you leave it on another page for 2 minutes, it goes back to the main page by itself. When real lightning is detected, it jumps to the main page too.
 

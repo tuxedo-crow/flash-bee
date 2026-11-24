@@ -463,7 +463,7 @@ def guide_story(toc):
             "raw sensor data. A two-level alert, ACTIVITY and SHELTER, turns the numbers into a clear "
             "instruction about when to go inside."),
           box("Quick start", bullets([
-              "Slide the power switch on the bottom of the case to on. The screen shows <b>AS3935</b> and a status line that ends in <b>CAL OK</b>, "
+              "Slide the power switch on the bottom of the case to on. The screen shows the <b>FLASH BEE</b> splash, then <b>AS3935</b> and a status line that ends in <b>CAL OK</b>, "
               "then the main screen. (On the very first start it also shows <b>TUNING ANTENNA...</b> for a few seconds. "
               "Let it finish.)",
               "<b>\"--\" and \"waiting...\"</b> with green rings drifting in toward the middle means it is listening, "
@@ -855,6 +855,7 @@ def guide_story(toc):
           P("Step 7. The first start", H2),
           P("Watch the screen after the upload (or the next time you switch on):"),
           table([["Screen", "What is happening"],
+                 ["FLASH BEE", "The splash, with the owner's line under it if one is set (console: <font face=\"Courier\">splash &lt;text&gt;</font>)."],
                  ["AS3935 / INITIALIZING...", "Looking for the sensor on D4/D5."],
                  ["TUNING ANTENNA...", "First start only: it tries all 16 tuning settings of the antenna (about 4 seconds), "
                   "measures each one through the IRQ wire, keeps the one closest to 500 kHz, and remembers it."],

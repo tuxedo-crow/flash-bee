@@ -6,6 +6,7 @@
 //       bootCount, crashCount (u32), lastCrash (u8): restart diagnostics, written once per boot.
 //       crumb (blob, struct Crumb): where the loop was at the last crash; written on a crash boot only.
 //       tunCap (u8 0-15, antenna TUN_CAP; absent = never tuned), lcoHz (u32, LCO measured at that cap).
+//       splash (string, max 31 chars: owner dedication line on the boot splash; kept by factoryReset like tunCap).
 //       rClose (u8 km code, 0 = none), rEnergy (u32), rStormMax (u32), rTotal (u32), rStorms (u32).
 // Writes are deferred: a change is written at most once per NVS_MIN_INTERVAL_MS (10 s), only the
 // keys that changed. persistFlush() writes at once (leaving Settings, resetting records).
@@ -37,6 +38,8 @@ void loadPrefs() {
   rec.storms    = prefs.getULong("rStorms", 0);
   uint8_t tc = prefs.getUChar("tunCap", 0xFF);
   if (tc <= 15) { tunSaved = tc; tunCap = tc; lcoHz = prefs.getULong("lcoHz", 0); }
+  prefs.getString("splash", splashText, sizeof(splashText));   // absent = empty (buffer left untouched)
+  splashText[sizeof(splashText) - 1] = '\0';
   savedCfg = cfg;
   savedRec = rec;
   LOG.printf("[SET] profile %s, units %s, brightness %s, rot %u, screen off %s\n", PMODE_NAME[profSaved],
@@ -199,6 +202,8 @@ static const char* const CRUMB_STAGE[CS_COUNT] = { "boot", "console", "touch", "
   "uitick", "battery", "persist", "net", "ota", "profile", "draw", "push", "health", "rest", "sleep", "shot" };
 static const char* const CRUMB_EVTN[CE_COUNT] = { "none", "strike", "touch", "page", "scr-on", "scr-off", "wake", "nvs", "cmd", "ota" };
 
+const char* crumbStageName(uint8_t s) { return s < CS_COUNT ? CRUMB_STAGE[s] : "?"; }
+
 // "stage=... page=n up=Ns evt=... pass=n net=busy|idle" for a valid crumb.
 void crumbText(const Crumb& c, char* b, size_t n) {
   snprintf(b, n, "stage=%s page=%u up=%lus evt=%s pass=%lu net=%s",
@@ -222,6 +227,12 @@ void bootDiag() {
     crumbText(last, cb, sizeof(cb));
     LOG.printf("[BOOT] last crumb: %s\n", cb);
   }
+  // The heap ring survives every reset except power loss (RTC_NOINIT is garbage then); a crash boot prints it.
+  bool heapOk = r != ESP_RST_POWERON && r != ESP_RST_BROWNOUT && heapRecValid();
+  if (!heapOk) { heapRecClear(); memset(&heapFail, 0, sizeof(heapFail)); heapFail.magic = HEAPLOW_MAGIC; }
+  else if (heapFail.magic != HEAPLOW_MAGIC) { memset(&heapFail, 0, sizeof(heapFail)); heapFail.magic = HEAPLOW_MAGIC; }
+  heapFailSeen = heapFail.count;
+  if (crash && heapOk) heapLowPrint("[BOOT]");
   if (!prefsOk) { if (crumbOk) crumbSaved = last; return; }
   if (prefs.getBytesLength("crumb") == sizeof(Crumb)) prefs.getBytes("crumb", &crumbSaved, sizeof(Crumb));
   if (crumbOk) { crumbSaved = last; prefs.putBytes("crumb", &last, sizeof(Crumb)); }
@@ -253,7 +264,8 @@ void diagReset() {
   LOG.println("[DIAG] reset");
 }
 
-// Test console: first-boot state (records, settings, profile AUTO, diagnostics), written to NVS at once. Network settings stay (wifi forget).
+// Test console: first-boot state (records, settings, profile AUTO, diagnostics), written to NVS at once. Network settings stay (wifi forget),
+// and so do the antenna tuning and the splash text (an owner label: `splash off` clears it).
 void factoryReset() {
   resetRecords();
   cfg.miles = USE_MILES;

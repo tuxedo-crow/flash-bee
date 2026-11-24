@@ -54,6 +54,7 @@
 #include <esp_task_wdt.h>
 #include <esp_sleep.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 #include "driver/gpio.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_rom_sys.h"
@@ -110,6 +111,8 @@ uint32_t lastFlashMs = 0;
 // -- UI / input state ------------------------------------------------------
 Page curPage = PAGE_MAIN;
 uint32_t lastTouchMs = 0;        // any touch activity (down, held, up)
+char splashText[32] = "";        // owner's dedication line (NVS key "splash", max 31 chars); empty = title only
+uint32_t splashUntil = 0;        // `splash show`: drawUIFrame() draws the splash instead of the page until this millis() (0 = off)
 TouchState ts;
 TouchEvent evQ[EVQ_LEN];
 uint8_t evHead = 0, evCount = 0;
@@ -214,6 +217,12 @@ volatile uint32_t netBusySince = 0;    // task: millis() when the current networ
 // Crash breadcrumb: plain stores only. Lives in RTC memory, so a watchdog/panic reset keeps it; power loss does not.
 RTC_NOINIT_ATTR Crumb crumb;
 Crumb crumbSaved = {};                 // the crumb of the last crash (NVS), magic 0 = none
+RTC_NOINIT_ATTR HeapRec heapRec;       // heap low-water ring (see heapWatch in console.ino)
+RTC_NOINIT_ATTR HeapFail heapFail;
+uint32_t heapLastMin = 0xFFFFFFFFUL;   // lowest minimum already recorded this boot
+uint32_t heapFailSeen = 0;             // heapFail.count already printed
+uint8_t heapPrevStage = 0;
+volatile uint8_t netOp = 0;            // task: what the last network call was (NetOp); valid while netBusySince != 0
 #define CRUMB(s)     do { crumb.stage = (s); crumb.page = (uint8_t)curPage; crumb.net = netBusySince != 0; } while (0)
 #define CRUMB_EVT(e) (crumb.evt = (e))
 volatile int netSockFd = -1;          // task: socket fd while connected, else -1 (the loop may only shutdown() it)
@@ -773,6 +782,49 @@ void drawBoot(const char* msg, uint16_t color) {
   tft.drawString(msg, CX, CY + 12);
 }
 
+// -- Splash (boot and `splash show`) --------------------------------------------
+// Draws onto any TFT_eSPI target: `tft` at boot, `spr` for `splash show` (so `shot` can capture it).
+// The glass is a circle (radius 118 around CX,CY), so every line stays within its chord: at size 2 a line is
+// at most 16 chars (192 px). Longer dedications wrap at the first space where both lines fit; if none does
+// (or there is no space) the text drops to size 1 on one line (31 chars = 186 px).
+void drawSplash(TFT_eSPI &g) {
+  const char* txt = splashText;
+  size_t len = strlen(txt);
+  int dy = len ? 0 : 14;                               // title only: centre the group
+  g.fillScreen(C_BG);
+  g.drawCircle(CX, CY, 118, C_DIMRING);
+  g.setTextDatum(MC_DATUM);
+  g.fillTriangle(CX + 6, 34 + dy, CX - 8, 56 + dy, CX + 1, 56 + dy, C_GOLD);   // lightning bolt
+  g.fillTriangle(CX - 1, 50 + dy, CX + 9, 50 + dy, CX - 5, 72 + dy, C_GOLD);
+  g.setTextColor(C_GOLD, C_BG);
+  g.setTextSize(3);
+  g.drawString("FLASH BEE", CX, 92 + dy);
+  if (len) {
+    g.setTextColor(C_WHITE, C_BG);
+    if (len <= 16) {
+      g.setTextSize(2);
+      g.drawString(txt, CX, 138);
+    } else {
+      int best = -1;                                   // split at the first space where both halves fit, so a name
+      for (size_t i = 1; i + 1 < len; i++) {           // after "for" stays together: "for" / "Some Long Name"
+        if (txt[i] == ' ' && i <= 16 && len - i - 1 <= 16) { best = (int)i; break; }
+      }
+      if (best > 0) {
+        char l1[17], l2[17];
+        memcpy(l1, txt, best); l1[best] = '\0';
+        strlcpy(l2, txt + best + 1, sizeof(l2));
+        g.setTextSize(2);
+        g.drawString(l1, CX, 128);
+        g.drawString(l2, CX, 152);
+      } else {
+        g.setTextSize(1);
+        g.drawString(txt, CX, 138);
+      }
+    }
+  }
+  g.setTextSize(1);
+}
+
 uint64_t uptimeMs() {
   uint32_t m = millis();
   if (m < upLast) upHi++;
@@ -861,11 +913,15 @@ void setup() {
   tft.setRotation(cfg.rot);      // saved screen rotation (touch is mapped to match in readTouchXY)
   tft.fillScreen(C_BG);
   bootDiag();
+  heap_caps_register_failed_alloc_callback(heapFailCb);
   CRUMB(CS_BOOT);
   // Backlight PWM after tft.init(), which set the pin as a plain HIGH output.
   if (!ledcAttach(BL_PIN, BL_PWM_HZ, BL_PWM_BITS)) LOG.println("[SET] backlight PWM attach failed");
   applyBrightness();
   analogReadResolution(12);
+
+  drawSplash(tft);                                   // before startWatchdog(): a plain delay is fine (it yields)
+  delay(splashText[0] ? 2500 : 1200);
 
   drawBoot("INITIALIZING...", C_GREY);
 
@@ -1124,6 +1180,7 @@ void loop() {
   consolePoll();
   crumb.pass++;
   crumb.upS = (uint32_t)(uptimeMs() / 1000ULL);   // also keeps the 64-bit uptime counter across millis wraps
+  heapWatch();
   CRUMB(CS_TOUCH);
   touchPoll();
   handleTouch();
@@ -1155,11 +1212,13 @@ void loop() {
   persistTick(now);
   CRUMB(CS_NET);
   netTick(now);
+  heapWatch();
   CRUMB(CS_PROFILE);
   profileTick(now);
 
   CRUMB(CS_DRAW);
   drawUI();
+  heapWatch();
   CRUMB(CS_HEALTH);
   healthTick(millis(), micros() - loopStartUs);
   restOrSleep();                 // 50 ms of touch sampling, or one light sleep (power.ino)

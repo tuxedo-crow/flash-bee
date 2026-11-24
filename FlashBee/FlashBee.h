@@ -239,6 +239,33 @@ struct Crumb {
   uint8_t stage, page, evt, net;   // net = 1 when the net task was inside a network call (netBusySince != 0)
 };
 
+// Heap low-water ring (RTC_NOINIT like the crumb): one entry each time esp_get_minimum_free_heap_size() falls by HEAPLOW_STEP.
+#define HEAPLOW_MAGIC 0xF1A5BEE2UL
+#define HEAPLOW_N     8
+#define HEAPLOW_STEP  512
+enum NetOp : uint8_t { NOP_NONE, NOP_STALL, NOP_STOP, NOP_RESET, NOP_LOOP, NOP_PUBLISH, NOP_CONNECT, NOP_HELLO, NOP_COUNT };
+struct HeapLow {                        // 28 bytes
+  uint32_t upS, minFree, freeNow, maxBlk;
+  uint32_t drop;                        // LOG ring drops so far
+  uint16_t boot;                        // bootCount when recorded
+  uint8_t stage, prevStage;             // loop stage at this watch call, and at the one before it (the culprit ran between)
+  uint8_t netOp, netBusy;               // last net task operation, netBusy = inside a network call right now
+  uint8_t wifi, mqtt, logq, outq;       // wifiState, MQTT up, LOG ring depth, MQTT out queue depth
+  int8_t rssi;                          // 0 = WiFi not up
+  uint8_t pad;
+};
+struct HeapRec {                        // 16 + 8 * 28 = 240 bytes
+  uint32_t magic;
+  uint32_t sum;                         // checksum of everything after this field, rewritten on each record
+  uint32_t count;                       // lows recorded since the record was cleared
+  uint32_t head;                        // next slot (oldest once full)
+  HeapLow e[HEAPLOW_N];
+};
+struct HeapFail {                       // written from the failed-alloc callback: plain stores, no checksum
+  uint32_t magic;
+  uint32_t count, lastSize, lastCaps, lastUpS;
+};
+
 enum Page : uint8_t { PAGE_MAIN, PAGE_CHART, PAGE_F2B, PAGE_RECORDS, PAGE_SETTINGS, PAGE_NERD, PAGE_COUNT };
 
 enum TouchEvt : uint8_t { EV_NONE, EV_TAP, EV_SWIPE_LEFT, EV_SWIPE_RIGHT, EV_LONG_PRESS, EV_RESET_HOLD };

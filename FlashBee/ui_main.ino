@@ -443,6 +443,10 @@ void drawShelterTag(uint32_t now) {
 
 // -- Dispatcher ------------------------------------------------------------
 void drawUIFrame() {                 // render the current page into the sprite (no push)
+  if (splashUntil) {                   // `splash show`: hold the splash over the page until it runs out
+    if ((int32_t)(splashUntil - millis()) > 0) { drawSplash(spr); return; }
+    splashUntil = 0;
+  }
   spr.fillSprite(C_BG);
   switch (curPage) {
     case PAGE_MAIN:     drawMain(); break;
