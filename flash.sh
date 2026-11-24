@@ -31,6 +31,9 @@ if [ -d "$LIBDIR/TFT_eSPI" ]; then
   echo "WARNING: $LIBDIR/TFT_eSPI conflicts with Seeed_GFX. Rename or remove it if the build picks the wrong one."
 fi
 
+echo "== Build stamp"
+bash "$(dirname "$0")/stamp.sh"
+
 echo "== Compile ($FQBN)"
 arduino-cli compile --fqbn "$FQBN" "$SKETCH"
 

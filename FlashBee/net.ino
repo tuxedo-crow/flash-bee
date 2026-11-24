@@ -52,7 +52,7 @@ static void netLoadStr(const char* key, char* dst, size_t cap) {
   dst[0] = '\0';
   if (!prefsOk) return;
   size_t n = prefs.getString(key, dst, cap);
-  if (n == 0 || n >= cap) dst[0] = '\0';
+  if (n == 0 || n > cap) dst[0] = '\0';
   dst[cap - 1] = '\0';
 }
 
@@ -131,7 +131,8 @@ bool conMqttAllowed(const char* raw) {
     while (*p && *p != ' ' && *p != '\t') { if (i < 11) t[i++] = (char)tolower((unsigned char)*p); p++; }
     t[i] = '\0';
   }
-  if (!strcmp(t0, "factory") || !strcmp(t0, "hang") || !strcmp(t0, "shot") || !strcmp(t0, "mqttcmd") || !strcmp(t0, "tune")) return false;
+  if (!strcmp(t0, "factory") || !strcmp(t0, "hang") || !strcmp(t0, "shot") || !strcmp(t0, "mqttcmd") || !strcmp(t0, "tune")
+      || !strcmp(t0, "fault") || !strcmp(t0, "strike") || !strcmp(t0, "burst")) return false;
   if (!strcmp(t0, "wifi") || !strcmp(t0, "ota")) return t1[0] == '\0';          // status only
   if (!strcmp(t0, "mqtt")) return t1[0] == '\0' || !strcmp(t1, "dump");         // status and dump only
   if (!strcmp(t0, "sleep")) return t1[0] == '\0';                                // status only
@@ -173,6 +174,7 @@ static void otaDraw(const char* l1, const char* l2) {
 }
 
 static void otaOnStart() {
+  CRUMB_EVT(CE_OTA);
   otaActive = true;
   otaPct = 0;
   esp_task_wdt_reset();
@@ -247,7 +249,8 @@ static size_t buildState(char* out, size_t n) {
   if (any) { snprintf(last, sizeof(last), "%lu", (unsigned long)((now - S.lastStrikeMs) / 1000UL));
              snprintf(en, sizeof(en), "%lu", (unsigned long)S.lastEnergy); }
   else     { snprintf(last, sizeof(last), "null"); snprintf(en, sizeof(en), "null"); }
-  if (S.clearRunning) snprintf(clr, sizeof(clr), "%lu", (unsigned long)((CLEAR_MS - (now - S.clearFromMs)) / 1000UL));
+  if (S.clearRunning) { uint32_t el = now - S.clearFromMs;
+                        snprintf(clr, sizeof(clr), "%lu", (unsigned long)(el >= CLEAR_MS ? 0 : (CLEAR_MS - el) / 1000UL)); }
   else                snprintf(clr, sizeof(clr), "null");
   if (battPct >= 0) { snprintf(batp, sizeof(batp), "%d", battPct); snprintf(batm, sizeof(batm), "%lu", (unsigned long)(battMv * 2)); }
   else              { snprintf(batp, sizeof(batp), "null"); snprintf(batm, sizeof(batm), "null"); }
@@ -295,8 +298,8 @@ static size_t buildDisc(int i, char* topic, size_t tn, char* out, size_t on) {
   return snprintf(out, on,
     "{\"name\":\"%s\",\"unique_id\":\"flashbee_%s_%s\",\"has_entity_name\":true,\"~\":\"%s\","
     "\"availability_topic\":\"~/availability\",\"state_topic\":\"~/state\",\"value_template\":\"%s\"%s%s,"
-    "\"device\":{\"identifiers\":[\"flashbee_%s\"],\"name\":\"Flash Bee %s\",\"manufacturer\":\"DIY\",\"model\":\"Flash Bee\"}}",
-    e.name, devId, e.key, ncfg.mPfx, e.tmpl, e.extra[0] ? "," : "", e.extra, devId, devId);
+    "\"device\":{\"identifiers\":[\"flashbee_%s\"],\"name\":\"Flash Bee %s\",\"manufacturer\":\"DIY\",\"model\":\"Flash Bee\",\"sw_version\":\"%s\"}}",
+    e.name, devId, e.key, ncfg.mPfx, e.tmpl, e.extra[0] ? "," : "", e.extra, devId, devId, BUILD_GIT);
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -467,6 +470,7 @@ static void netTaskFn(void*) {
     backoff = MQTT_BACKOFF_MIN;
     while (xQueueReceive(netOutQ, &m, 0) == pdTRUE) {}  // anything queued for the old connection is stale
     netBusySince = millis() ? millis() : 1;
+    mqtt.publish(s.cmd, (const uint8_t*)"", 0, true);   // clear a retained command before it can replay
     mqtt.subscribe(s.cmd);
     mqtt.publish(s.avail, "online", true);
     netBusySince = 0;
@@ -642,7 +646,7 @@ void netTick(uint32_t now) {
       if (otaRestart) { if (otaRunning) otaStop(); otaRestart = false; }
       if (ncfg.otaPass[0] && !otaRunning) otaStart();
       else if (!ncfg.otaPass[0] && otaRunning) otaStop();
-      if (otaRunning) ArduinoOTA.handle();
+      if (otaRunning) { CRUMB(CS_OTA); ArduinoOTA.handle(); CRUMB(CS_NET); }
       netTaskRun = ncfg.mHost[0] != 0;
       if (netTaskRun) netTaskEnsure();
       mqttTick(now);
@@ -786,7 +790,7 @@ static void mqttDump() {
   StrikeMsg m = { 123456, 14, 77 };
   n = buildStrike(m, buf, sizeof(buf));
   LOG.printf("[MQTT] strike %s (%u bytes)\n%s\n", tStrike, (unsigned)n, buf);
-  Serial.setTxTimeoutMs(0);
+  Serial.setTxTimeoutMs(1);
 }
 
 bool conMqtt(int n, char** tok) {

@@ -15,6 +15,7 @@ static void profileLoadKnobs() {
   cfg.indoor = 0;                                   // OUTDOOR in every profile
   cfg.mnl = d.mnl;
   noiseFloor = NF_DEFAULT;
+  noiseFault = false;
   watchdog = d.wd;
   spikeRej = d.sr;
   profOverride = false;
@@ -34,7 +35,7 @@ void profileApply(Profile p, const char* why) {
   if (sensorOk && !sensorLost) {                    // a lost sensor gets them from initSensor() when it returns
     applyGain();
     applyWatchdogSpike();
-    maskWrite(0x03, 0x20, PROFILES[profEff].maskDist << 5);
+    writeReg3(0, PROFILES[profEff].maskDist);   // no read: it would eat a pending interrupt
     applyMnl();
     senseLastAdj = nfLastAdj = millis();
     nfLastRaise = millis() - NF_RAISE_INTERVAL;
